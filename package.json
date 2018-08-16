@@ -1,0 +1,45 @@
+{
+  "name": "papq",
+  "version": "0.0.1",
+  "description": "Partitioned Async Priority Queue",
+  "main": "dist/index.js",
+  "scripts": {
+    "test": "make test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thebigredgeek/papq.git"
+  },
+  "keywords": [
+    "async",
+    "priority",
+    "queue",
+    "queue",
+    "partition",
+    "datastructure"
+  ],
+  "author": "Andrew E. Rhyne",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/thebigredgeek/papq/issues"
+  },
+  "homepage": "https://github.com/thebigredgeek/papq#readme",
+  "devDependencies": {
+    "@types/bluebird": "^3.5.23",
+    "@types/chai": "^4.1.4",
+    "@types/mocha": "^5.2.5",
+    "@types/node": "^10.7.0",
+    "chai": "^4.1.2",
+    "mocha": "^5.2.0",
+    "rimraf": "^2.6.2",
+    "ts-node": "^7.0.1",
+    "tsc": "^1.20150623.0",
+    "tslint": "^5.11.0",
+    "typescript": "^3.0.1"
+  },
+  "dependencies": {
+    "extendable-error": "^0.1.5",
+    "qheap": "^1.4.0",
+    "uuid": "^3.3.2"
+  }
+}
