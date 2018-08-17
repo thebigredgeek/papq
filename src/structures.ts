@@ -1,15 +1,35 @@
 import * as BinHeap from 'qheap'
 import ExtendableError from 'extendable-error'
-
+import * as EventEmitter from 'events'
 
 const wait = time => new Promise(resolve => setTimeout(resolve, time))
 
 export interface PAPQOptions {
-  removePartitionOnEmpty: boolean,
-  partitionGCDelay: number,
-  rejectEnqueueWhenBreakerThrown: boolean,
+  removePartitionOnEmpty?: boolean,
+  partitionGCDelay?: number,
+  rejectEnqueueWhenBreakerThrown?: boolean,
   maxRetries?: number,
   backoff?: (retries: number) => number
+}
+
+interface PAPQPartitionOptions {
+  backoff: (retries: number) => number,
+  maxRetries: number,
+  rejectEnqueueWhenBreakerThrown: boolean
+}
+
+const typeCheck = (d: any, t: string) => Object.prototype.toString.call(d) === `[object ${t}`
+
+const events = {
+  BREAKER_THROWN: 'breaker:thrown',
+  BREAKER_RESET: 'breaker:reset',
+  PARTITION_START: 'partition:start',
+  PARTITION_STOP: 'partition:stop',
+  PARTITION_CREATED: 'partition:created',
+  PARTITION_DESTROYED: 'partition:destroyed',
+  PARTITION_EMPTY: 'partition:empty',
+  ERROR: 'error',
+
 }
 
 class Deferred {
@@ -30,32 +50,29 @@ class PartitionBreakerThrownError extends ExtendableError {
   }
 }
 
-export class PAPQNode <T> {
-  public data: T
-  public deferred: Deferred
+class PAPQNode <T> {
+  public deferred: Deferred = new Deferred()
   public partitionKey: string
 
-  constructor (data) {
-    this.data = data
-    this.deferred = new Deferred()
-  }
+  constructor (
+    public data: T
+  ) {}
 }
 
-export class PAPQPartition <T> {
+class PAPQPartition <T> extends EventEmitter {
+
   private heap: BinHeap
   private subscriber: (d: T) => Promise<void> | void = (d: T) => null
+  private running: boolean = false
   public healthy: boolean = true
-
 
   constructor (
     private comparator: (nd: T, d: T) => boolean,
     public partitionKey: string,
-    private onEmpty: (key: string) => void,
-    private onThrownBreaker: (key: string) => void,
-    private backoff: (retries: number) => number = (retries: number) => retries * 1000,
-    private maxRetries: number = 3,
-    private rejectEnqueueWhenBreakerThrown: boolean = true
+    private options: PAPQPartitionOptions
   ) {
+    super()
+
     this.heap = new BinHeap({
       comparBefore: (n1, n2) => this.comparator(n1.data, n2.data)
     })
@@ -70,8 +87,8 @@ export class PAPQPartition <T> {
       await this.subscriber(next.data)
       next.deferred.resolve()
     } catch (err) {
-      if (retries < this.maxRetries) {
-        await wait(this.backoff(retries))
+      if (retries < this.options.maxRetries) {
+        await wait(this.options.backoff(retries))
         return await this.exec(next, retries + 1)
       }
 
@@ -79,12 +96,14 @@ export class PAPQPartition <T> {
 
       this.throwBreaker()
 
+      this.emit(events.ERROR, this.partitionKey, err)
+
       throw err;
     }
   }
 
   public enqueue (n: PAPQNode<T>) {
-    if (!this.healthy) {
+    if (!this.healthy && this.options.rejectEnqueueWhenBreakerThrown) {
       throw new PartitionBreakerThrownError(this.partitionKey)
     }
 
@@ -94,11 +113,35 @@ export class PAPQPartition <T> {
 
   public async start (): Promise<void> {
     try {
+
+      if (!this.healthy || this.running) {
+        if (!this.healthy) {
+          console.warn(`PAPQPartition#start called on unhealthy partition ${this.partitionKey}`)
+        }
+        if (this.running) {
+          console.warn(`PAPQPartition#start called on already running partition ${this.partitionKey}`)
+        }
+        return
+      }
+
+      this.running = true
+
       while (this.heap.peek()) {
         await this.exec(this.heap.dequeue())
+        if (!this.running || !this.healthy) {
+          break
+        }
       }
-      this.onEmpty(this.partitionKey)
+
+      this.running = false
+
+      this.emit(events.PARTITION_EMPTY, this.partitionKey)
     } catch (err) {}
+  }
+
+
+  public stop (): void {
+    this.running = false
   }
 
   public empty (): void {
@@ -108,16 +151,19 @@ export class PAPQPartition <T> {
       next.deferred.reject()
       next = this.heap.dequeue()
     }
+    this.emit(events.PARTITION_EMPTY, this.partitionKey)
   }
 
   public throwBreaker (): void {
     this.healthy = false
-    this.onThrownBreaker(this.partitionKey)
+    this.running = false
+    this.emit(events.BREAKER_THROWN, this.partitionKey)
   }
 
   public resetBreaker (): void {
     this.healthy = true
     this.start()
+    this.emit(events.BREAKER_RESET, this.partitionKey)
   }
 
   public subscribe(subscriber: (d: T) => Promise<void> | void): void {
@@ -125,27 +171,87 @@ export class PAPQPartition <T> {
   }
 }
 
-export class PAPQ <T> {
+export default class PAPQ <T> extends EventEmitter {
   private partitions: Map<string, PAPQPartition<T>>
   private partitionGCs: Map<string, NodeJS.Timer>
-  private thrownBreakerHandler: (key: string) => void = (key: string) => console.warn(`Unhandled thrown breaker on partition ${key}`)
   private subscriber: (d: T) => Promise<void> | void = (d: T) => console.warn(`Received enqueued item but no subscriber is attached`)
 
   constructor (
     private partitioner: (d: any) => string,
     private comparator: (nd: any, d: any) => boolean,
-    private options: PAPQOptions = { removePartitionOnEmpty: false, partitionGCDelay: 60000, rejectEnqueueWhenBreakerThrown: true, backoff: undefined, maxRetries: undefined }
-  ) {}
+    private options: PAPQOptions
+  ) {
+
+    super()
+
+    if (!typeCheck(this.partitioner, 'Function')) {
+      throw new Error('PAPQ constructor requires partitioner function as first parameter')
+    }
+
+    if (!typeCheck(this.comparator, 'Function')) {
+      throw new Error('PAPQ constructor requires comparator function as second parameter')
+    }
+
+    if (!typeCheck(this.options, 'Object')){
+      this.options = {
+        removePartitionOnEmpty: true,
+        partitionGCDelay: 60000,
+        rejectEnqueueWhenBreakerThrown: true,
+        maxRetries: undefined,
+        backoff: (retries: number) => retries * 1000
+      }
+    }
+
+    if (!typeCheck(this.options.removePartitionOnEmpty, 'Boolean')) {
+      this.options.removePartitionOnEmpty = true
+    }
+
+    if (!typeCheck(this.options.partitionGCDelay, 'Number')) {
+      this.options.partitionGCDelay = 60000
+    }
+
+    if (!typeCheck(this.options.rejectEnqueueWhenBreakerThrown, 'Boolean')) {
+      this.options.rejectEnqueueWhenBreakerThrown = true
+    }
+
+    if (!typeCheck(this.options.maxRetries, 'Number')) {
+      this.options.maxRetries = undefined
+    }
+
+    if (!typeCheck(this.options.backoff, 'Function')) {
+      this.options.backoff = (retries: number) => retries * 1000
+    }
+
+    super()
+  }
 
   public get partitionKeys (): Array<string> {
     return Array.from(this.partitions.keys())
   }
 
 
+  private destroyPartition (partitionKey: string) : void {
+    this.partitions.delete(partitionKey)
+    this.emit(events.PARTITION_DESTROYED, partitionKey)
+  }
+
   private handlePartitionEmpty (partitionKey: string) {
     if (this.options.removePartitionOnEmpty) {
-      this.partitionGCs.set(partitionKey, global.setTimeout(() => this.partitions.delete(partitionKey), this.options.partitionGCDelay))
+      this.partitionGCs.set(partitionKey, global.setTimeout(this.destroyPartition.bind(this), this.options.partitionGCDelay))
     }
+    this.emit(events.PARTITION_EMPTY, partitionKey)
+  }
+
+  private handleBreakerThrown (partitionKey: string) {
+    this.emit(events.BREAKER_THROWN, partitionKey)
+  }
+
+  private handleBreakerReset (partitionKey: string) {
+    this.emit(events.BREAKER_RESET, partitionKey)
+  }
+
+  private handlePartitionError (partitionKey: string, err: Error): void {
+    this.emit(events.ERROR, partitionKey, err)
   }
 
   public enqueue (data: T): Promise<Function> {
@@ -156,13 +262,30 @@ export class PAPQ <T> {
     let p: PAPQPartition<T> = this.partitions.get(partitionKey)
 
     if (!p) {
-      p = new PAPQPartition<T>(this.comparator, partitionKey, this.handlePartitionEmpty, this.thrownBreakerHandler, this.options.backoff, this.options.maxRetries, this.options.rejectEnqueueWhenBreakerThrown)
 
+      const options: PAPQPartitionOptions = {
+        backoff: this.options.backoff,
+        maxRetries: this.options.maxRetries,
+        rejectEnqueueWhenBreakerThrown: this.options.rejectEnqueueWhenBreakerThrown
+      }
+
+      p = new PAPQPartition<T>(this.comparator, partitionKey, options)
+
+      p.on(events.PARTITION_EMPTY, this.handlePartitionEmpty.bind(this))
+      p.on(events.BREAKER_THROWN,  this.handleBreakerThrown.bind(this))
+      p.on(events.BREAKER_RESET, this.handleBreakerReset.bind(this))
+      p.on(events.ERROR, this.handlePartitionError.bind(this))
 
       this.partitions.set(partitionKey, p)
+
+      this.emit(events.PARTITION_CREATED, partitionKey)
     }
 
     p.enqueue(n)
+
+    if (this.subscriber) {
+      p.start()
+    }
 
     if (this.partitionGCs.get(partitionKey)) {
       global.clearTimeout(this.partitionGCs.get(partitionKey))
@@ -170,11 +293,6 @@ export class PAPQ <T> {
     }
 
     return n.deferred.promise
-  }
-
-
-  public onThrownBreaker(fn: (key: string) => void) {
-    this.thrownBreakerHandler = fn
   }
 
   public resetPartitionBreaker(key: string) {
@@ -211,6 +329,26 @@ export class PAPQ <T> {
   }
 
   public subscribe(fn: (d: T) => void) {
+
+    let wasSubscribed = !!this.subscriber
+
+    if (wasSubscribed) {
+      console.warn('PAPQ#subscribe called more than once, which rebinds the subscription to a new function each time!  Only one subscriber can be present')
+    }
+
     this.subscriber = fn
+
+    if (!wasSubscribed) {
+      this.start()
+    }
+  }
+
+  public stop(): void {
+    this.partitionKeys.forEach(key => this.partitions.get(key).stop())
+  }
+
+  public start(): void {
+    this.partitionKeys.forEach(key => this.partitions.get(key).start())
   }
 }
+
