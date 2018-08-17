@@ -20,4 +20,6 @@ clean: .PHONY
 	rimraf dist
 
 test: .PHONY
+	node chaos-monkey-test.js
 	mocha -r ts-node/register test/spec.ts	
+

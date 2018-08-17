@@ -18,7 +18,7 @@ interface PAPQPartitionOptions {
   rejectEnqueueWhenBreakerThrown: boolean
 }
 
-const typeCheck = (d: any, t: string) => Object.prototype.toString.call(d) === `[object ${t}`
+const typeCheck = (d: any, t: string) => Object.prototype.toString.call(d) === `[object ${t}]`
 
 const events = {
   BREAKER_THROWN: 'breaker:thrown',
@@ -33,7 +33,7 @@ const events = {
 }
 
 class Deferred {
-  public promise: Promise<Function>
+  public promise: Promise<any>
   public resolve: Function
   public reject: Function
   constructor () {
@@ -92,9 +92,9 @@ class PAPQPartition <T> extends EventEmitter {
         return await this.exec(next, retries + 1)
       }
 
-      next.deferred.reject(err)
-
       this.throwBreaker()
+
+      this.heap.insert(next)
 
       this.emit(events.ERROR, this.partitionKey, err)
 
@@ -114,17 +114,18 @@ class PAPQPartition <T> extends EventEmitter {
   public async start (): Promise<void> {
     try {
 
-      if (!this.healthy || this.running) {
-        if (!this.healthy) {
-          console.warn(`PAPQPartition#start called on unhealthy partition ${this.partitionKey}`)
-        }
-        if (this.running) {
-          console.warn(`PAPQPartition#start called on already running partition ${this.partitionKey}`)
-        }
+      if (!this.healthy) {
+        console.warn(`PAPQPartition#start called on unhealthy partition ${this.partitionKey}`)
+        return
+      }
+
+      if (this.running) {
         return
       }
 
       this.running = true
+
+      this.emit(events.PARTITION_START, this.partitionKey)
 
       while (this.heap.peek()) {
         await this.exec(this.heap.dequeue())
@@ -135,13 +136,16 @@ class PAPQPartition <T> extends EventEmitter {
 
       this.running = false
 
-      this.emit(events.PARTITION_EMPTY, this.partitionKey)
+      if (this.heap.length < 1) {
+        this.emit(events.PARTITION_EMPTY, this.partitionKey)
+      }
     } catch (err) {}
   }
 
 
   public stop (): void {
     this.running = false
+    this.emit(events.PARTITION_STOP, this.partitionKey)
   }
 
   public empty (): void {
@@ -156,9 +160,9 @@ class PAPQPartition <T> extends EventEmitter {
 
   public throwBreaker (): void {
     this.healthy = false
-    this.running = false
     this.emit(events.BREAKER_THROWN, this.partitionKey)
-  }
+    this.stop()
+ }
 
   public resetBreaker (): void {
     this.healthy = true
@@ -172,9 +176,9 @@ class PAPQPartition <T> extends EventEmitter {
 }
 
 export default class PAPQ <T> extends EventEmitter {
-  private partitions: Map<string, PAPQPartition<T>>
-  private partitionGCs: Map<string, NodeJS.Timer>
-  private subscriber: (d: T) => Promise<void> | void = (d: T) => console.warn(`Received enqueued item but no subscriber is attached`)
+  private partitions: Map<string, PAPQPartition<T>> = new Map<string, PAPQPartition<T>>()
+  private partitionGCs: Map<string, NodeJS.Timer> = new Map<string, NodeJS.Timer>()
+  private subscriber: (d: T, partitionKey?: string) => Promise<void> | void
 
   constructor (
     private partitioner: (d: any) => string,
@@ -222,7 +226,6 @@ export default class PAPQ <T> extends EventEmitter {
       this.options.backoff = (retries: number) => retries * 1000
     }
 
-    super()
   }
 
   public get partitionKeys (): Array<string> {
@@ -235,18 +238,26 @@ export default class PAPQ <T> extends EventEmitter {
     this.emit(events.PARTITION_DESTROYED, partitionKey)
   }
 
-  private handlePartitionEmpty (partitionKey: string) {
+  private handlePartitionStart (partitionKey: string) : void {
+    this.emit(events.PARTITION_START, partitionKey)
+  }
+
+  private handlePartitionStop (partitionKey: string) : void {
+    this.emit(events.PARTITION_STOP, partitionKey)
+  }
+
+  private handlePartitionEmpty (partitionKey: string) : void {
     if (this.options.removePartitionOnEmpty) {
       this.partitionGCs.set(partitionKey, global.setTimeout(this.destroyPartition.bind(this), this.options.partitionGCDelay))
     }
     this.emit(events.PARTITION_EMPTY, partitionKey)
   }
 
-  private handleBreakerThrown (partitionKey: string) {
+  private handleBreakerThrown (partitionKey: string) : void {
     this.emit(events.BREAKER_THROWN, partitionKey)
   }
 
-  private handleBreakerReset (partitionKey: string) {
+  private handleBreakerReset (partitionKey: string) : void {
     this.emit(events.BREAKER_RESET, partitionKey)
   }
 
@@ -254,7 +265,7 @@ export default class PAPQ <T> extends EventEmitter {
     this.emit(events.ERROR, partitionKey, err)
   }
 
-  public enqueue (data: T): Promise<Function> {
+  public enqueue (data: T): Promise<void> {
     const n: PAPQNode<T> = new PAPQNode<T>(data)
 
     const partitionKey: string = this.partitioner(data)
@@ -271,12 +282,16 @@ export default class PAPQ <T> extends EventEmitter {
 
       p = new PAPQPartition<T>(this.comparator, partitionKey, options)
 
+      p.on(events.PARTITION_START, this.handlePartitionStart.bind(this))
+      p.on(events.PARTITION_STOP, this.handlePartitionStop.bind(this))
       p.on(events.PARTITION_EMPTY, this.handlePartitionEmpty.bind(this))
       p.on(events.BREAKER_THROWN,  this.handleBreakerThrown.bind(this))
       p.on(events.BREAKER_RESET, this.handleBreakerReset.bind(this))
       p.on(events.ERROR, this.handlePartitionError.bind(this))
 
       this.partitions.set(partitionKey, p)
+
+      p.subscribe((d: T) => this.subscriber(d, partitionKey))
 
       this.emit(events.PARTITION_CREATED, partitionKey)
     }
@@ -295,7 +310,7 @@ export default class PAPQ <T> extends EventEmitter {
     return n.deferred.promise
   }
 
-  public resetPartitionBreaker(key: string) {
+  public resetPartitionBreaker(key: string) : void {
     const partition = this.partitions.get(key)
 
     if (!partition) {
@@ -306,7 +321,7 @@ export default class PAPQ <T> extends EventEmitter {
     partition.resetBreaker()
   }
 
-  public throwPartitionBreaker(key: string) {
+  public throwPartitionBreaker(key: string) : void {
     const partition = this.partitions.get(key)
 
     if (!partition) {
@@ -317,7 +332,7 @@ export default class PAPQ <T> extends EventEmitter {
     partition.throwBreaker()
   }
 
-  public emptyPartition(key: string) {
+  public emptyPartition(key: string) : void {
     const partition = this.partitions.get(key)
 
     if (!partition) {
@@ -328,7 +343,7 @@ export default class PAPQ <T> extends EventEmitter {
     partition.empty()
   }
 
-  public subscribe(fn: (d: T) => void) {
+  public subscribe(fn: (d: T, partitionKey?: string) => void) : void {
 
     let wasSubscribed = !!this.subscriber
 
@@ -343,12 +358,21 @@ export default class PAPQ <T> extends EventEmitter {
     }
   }
 
-  public stop(): void {
+  public stop(key?: string): void {
+    if (key !== undefined && key !== null) {
+      this.partitions.get(key).stop()
+      return
+    }
     this.partitionKeys.forEach(key => this.partitions.get(key).stop())
   }
 
-  public start(): void {
+  public start(key?: string): void {
+    if (key !== undefined && key !== null) {
+      this.partitions.get(key).start()
+      return
+    }
     this.partitionKeys.forEach(key => this.partitions.get(key).start())
   }
 }
 
+module.exports = PAPQ
