@@ -57,7 +57,7 @@ q.on('partition:empty', partitionKey => {
 		clearInterval(manualBreakerMonkey)
 	}
 })
-q.on('error', (partitionKey, err) => console.trace(`error in partition ${partitionKey}`, err))
+q.on('error', (partitionKey, err) => console.log(`error in partition ${partitionKey} - ${err.message}`))
 
 
 const map = {}
@@ -70,6 +70,7 @@ for (var i = 0; i < TARGET_NUM_EVENTS; i++) {
   if (map[id]) {
     const val = map[id]
     val.push({ id, value })
+    // NOTE: This is greedy but just a test so whatever
     val.sort((d1, d2) => d1.value - d2.value)
     map[id] = val 
   } else {
@@ -89,8 +90,6 @@ q.subscribe(async (data, partitionKey) => {
   if (Math.floor(Math.random() * 10) + 1 <= 2) {
     throw new Error('random error that was thrown')
   }
-
-  // console.log(map, key, val)
 
   const next = val.shift()
   if (next.value !== data.value) {

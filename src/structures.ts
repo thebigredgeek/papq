@@ -64,6 +64,7 @@ class PAPQPartition <T> extends EventEmitter {
   private heap: BinHeap
   private subscriber: (d: T) => Promise<void> | void = (d: T) => null
   private running: boolean = false
+  private executing: boolean = false
   public healthy: boolean = true
 
   constructor (
@@ -83,9 +84,16 @@ class PAPQPartition <T> extends EventEmitter {
       return
     }
 
+    if (this.executing) {
+      return
+    }
+
+    this.executing = true
+
     try {
       await this.subscriber(next.data)
       next.deferred.resolve()
+      this.executing = false
     } catch (err) {
       if (retries < this.options.maxRetries) {
         await wait(this.options.backoff(retries))
@@ -95,10 +103,12 @@ class PAPQPartition <T> extends EventEmitter {
       this.throwBreaker()
 
       this.heap.insert(next)
+      // NOTE: Only unlock executing state once the node has been added back to the heap
+      this.executing = false
 
       this.emit(events.ERROR, this.partitionKey, err)
 
-      throw err;
+      throw err
     }
   }
 
@@ -119,7 +129,7 @@ class PAPQPartition <T> extends EventEmitter {
         return
       }
 
-      if (this.running) {
+      if (this.running || this.executing) {
         return
       }
 
@@ -164,9 +174,11 @@ class PAPQPartition <T> extends EventEmitter {
     this.stop()
  }
 
-  public resetBreaker (): void {
+  public resetBreaker (restart : boolean = true): void {
     this.healthy = true
-    this.start()
+    if (restart) {
+      this.start()
+    }
     this.emit(events.BREAKER_RESET, this.partitionKey)
   }
 
@@ -310,7 +322,7 @@ export default class PAPQ <T> extends EventEmitter {
     return n.deferred.promise
   }
 
-  public resetPartitionBreaker(key: string) : void {
+  public resetPartitionBreaker(key: string, restart?: boolean) : void {
     const partition = this.partitions.get(key)
 
     if (!partition) {
@@ -318,7 +330,7 @@ export default class PAPQ <T> extends EventEmitter {
       return
     }
 
-    partition.resetBreaker()
+    partition.resetBreaker(restart)
   }
 
   public throwPartitionBreaker(key: string) : void {
