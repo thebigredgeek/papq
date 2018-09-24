@@ -13,9 +13,6 @@ all: clean .PHONY
 configure: .PHONY
 	@NODE_ENV= $(PKG) install
 
-lint: .PHONY	
-	tslint -c tslint.json 'test/**/*.ts' 'src/**/*.ts'
-
 clean: .PHONY
 	rimraf dist
 

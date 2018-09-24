@@ -30,7 +30,6 @@ jobs:
         key: v1-dep-{{ .Branch }}-{{ epoch }}
         paths:
         - ./node_modules
-    - run: make lint
     - run: make
     - run: make test
     # Teardown
