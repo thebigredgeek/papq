@@ -1,4 +1,4 @@
-const PAPQ = require('./dist/structures.js')
+const PAPQ = require('./dist')
 
 const q = new PAPQ(data => data.id, (d1, d2) => d1.value < d2.value)
 
