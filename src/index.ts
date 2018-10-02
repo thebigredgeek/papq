@@ -28,6 +28,7 @@ const events = {
   PARTITION_CREATED: 'partition:created',
   PARTITION_DESTROYED: 'partition:destroyed',
   PARTITION_EMPTY: 'partition:empty',
+  PARTITION_EXEC_FINISHED: 'partition:exec_finished',
   ERROR: 'error',
 
 }
@@ -65,6 +66,7 @@ class PAPQPartition <T> extends EventEmitter {
   private subscriber: (d: T) => Promise<void> | void = (d: T) => null
   private running: boolean = false
   private executing: boolean = false
+  private skipsRemaining: number = 0
   public healthy: boolean = true
 
   constructor (
@@ -94,6 +96,7 @@ class PAPQPartition <T> extends EventEmitter {
       await this.subscriber(next.data)
       next.deferred.resolve()
       this.executing = false
+      this.emit(events.PARTITION_EXEC_FINISHED, this.partitionKey, next.data)
     } catch (err) {
       if (retries < this.options.maxRetries) {
         await wait(this.options.backoff(retries))
@@ -138,7 +141,16 @@ class PAPQPartition <T> extends EventEmitter {
       this.emit(events.PARTITION_START, this.partitionKey)
 
       while (this.heap.peek()) {
-        await this.exec(this.heap.dequeue())
+        const next = this.heap.dequeue()
+
+        if (this.skipsRemaining > 0) {
+          // If this partition has been marked to skip, skip the next few messages
+          this.skipsRemaining --
+          continue
+        }
+
+        await this.exec(next)
+
         if (!this.running || !this.healthy) {
           break
         }
@@ -184,6 +196,10 @@ class PAPQPartition <T> extends EventEmitter {
 
   public subscribe(subscriber: (d: T) => Promise<void> | void): void {
     this.subscriber = subscriber
+  }
+
+  public skip (num: number = 1) : void {
+    this.skipsRemaining = num
   }
 }
 
@@ -273,6 +289,10 @@ export default class PAPQ <T> extends EventEmitter {
     this.emit(events.BREAKER_RESET, partitionKey)
   }
 
+  private handleExecFinished (partitionKey: string, data: T) : void {
+    this.emit(events.PARTITION_EXEC_FINISHED, partitionKey, data)
+  }
+
   private handlePartitionError (partitionKey: string, err: Error): void {
     this.emit(events.ERROR, partitionKey, err)
   }
@@ -299,6 +319,7 @@ export default class PAPQ <T> extends EventEmitter {
       p.on(events.PARTITION_EMPTY, this.handlePartitionEmpty.bind(this))
       p.on(events.BREAKER_THROWN,  this.handleBreakerThrown.bind(this))
       p.on(events.BREAKER_RESET, this.handleBreakerReset.bind(this))
+      p.on(events.PARTITION_EXEC_FINISHED, this.handleExecFinished.bind(this))
       p.on(events.ERROR, this.handlePartitionError.bind(this))
 
       this.partitions.set(partitionKey, p)
@@ -368,6 +389,17 @@ export default class PAPQ <T> extends EventEmitter {
     if (!wasSubscribed) {
       this.start()
     }
+  }
+
+  public skip (key: string, num?: number) : void {
+    const partition = this.partitions.get(key)
+
+    if (!partition) {
+      console.warn(`PAPQ#skip was called with unknown partition key ${key}`)
+      return
+    }
+
+    return partition.skip(num)
   }
 
   public stop(key?: string): void {
