@@ -203,7 +203,7 @@ class PAPQPartition <T> extends EventEmitter {
   }
 }
 
-export default class PAPQ <T> extends EventEmitter {
+export class PAPQ <T> extends EventEmitter {
   private partitions: Map<string, PAPQPartition<T>> = new Map<string, PAPQPartition<T>>()
   private partitionGCs: Map<string, NodeJS.Timer> = new Map<string, NodeJS.Timer>()
   private subscriber: (d: T, partitionKey?: string) => Promise<void> | void
@@ -419,4 +419,3 @@ export default class PAPQ <T> extends EventEmitter {
   }
 }
 
-module.exports = PAPQ
