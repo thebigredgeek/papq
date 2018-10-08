@@ -90,6 +90,12 @@ class PAPQPartition <T> extends EventEmitter {
       return
     }
 
+    if (this.skipsRemaining) {
+      this.skipsRemaining --
+      this.emit(events.PARTITION_EXEC_FINISHED, this.partitionKey, next.data)
+      return
+    }
+
     this.executing = true
 
     try {
@@ -98,18 +104,17 @@ class PAPQPartition <T> extends EventEmitter {
       this.executing = false
       this.emit(events.PARTITION_EXEC_FINISHED, this.partitionKey, next.data)
     } catch (err) {
+      this.executing = false
       if (retries < this.options.maxRetries) {
         await wait(this.options.backoff(retries))
         return await this.exec(next, retries + 1)
       }
 
-      this.throwBreaker()
-
       this.heap.insert(next)
-      // NOTE: Only unlock executing state once the node has been added back to the heap
-      this.executing = false
 
       this.emit(events.ERROR, this.partitionKey, err)
+
+      this.throwBreaker()
 
       throw err
     }
@@ -126,13 +131,13 @@ class PAPQPartition <T> extends EventEmitter {
 
   public async start (): Promise<void> {
     try {
-
       if (!this.healthy) {
         console.warn(`PAPQPartition#start called on unhealthy partition ${this.partitionKey}`)
         return
       }
 
       if (this.running || this.executing) {
+        console.warn(`PAPQPartition#start called on already running or executing partition ${this.partitionKey}`)
         return
       }
 
@@ -142,12 +147,6 @@ class PAPQPartition <T> extends EventEmitter {
 
       while (this.heap.peek()) {
         const next = this.heap.dequeue()
-
-        if (this.skipsRemaining > 0) {
-          // If this partition has been marked to skip, skip the next few messages
-          this.skipsRemaining --
-          continue
-        }
 
         await this.exec(next)
 
@@ -182,16 +181,16 @@ class PAPQPartition <T> extends EventEmitter {
 
   public throwBreaker (): void {
     this.healthy = false
-    this.emit(events.BREAKER_THROWN, this.partitionKey)
     this.stop()
+    this.emit(events.BREAKER_THROWN, this.partitionKey)
  }
 
   public resetBreaker (restart : boolean = true): void {
     this.healthy = true
+    this.emit(events.BREAKER_RESET, this.partitionKey)
     if (restart) {
       this.start()
     }
-    this.emit(events.BREAKER_RESET, this.partitionKey)
   }
 
   public subscribe(subscriber: (d: T) => Promise<void> | void): void {
@@ -302,7 +301,7 @@ export class PAPQ <T> extends EventEmitter {
 
     const partitionKey: string = this.partitioner(data)
 
-    let p: PAPQPartition<T> = this.partitions.get(partitionKey)
+    let p: PAPQPartition<T> = this.partitions.get(partitionKey.toString())
 
     if (!p) {
 
@@ -322,11 +321,11 @@ export class PAPQ <T> extends EventEmitter {
       p.on(events.PARTITION_EXEC_FINISHED, this.handleExecFinished.bind(this))
       p.on(events.ERROR, this.handlePartitionError.bind(this))
 
-      this.partitions.set(partitionKey, p)
-
-      p.subscribe((d: T) => this.subscriber(d, partitionKey))
+      this.partitions.set(partitionKey.toString(), p)
 
       this.emit(events.PARTITION_CREATED, partitionKey)
+
+      p.subscribe((d: T) => this.subscriber(d, partitionKey))
     }
 
     p.enqueue(n)
