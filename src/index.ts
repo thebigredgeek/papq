@@ -132,12 +132,10 @@ class PAPQPartition <T> extends EventEmitter {
   public async start (): Promise<void> {
     try {
       if (!this.healthy) {
-        console.warn(`PAPQPartition#start called on unhealthy partition ${this.partitionKey}`)
         return
       }
 
       if (this.running || this.executing) {
-        console.warn(`PAPQPartition#start called on already running or executing partition ${this.partitionKey}`)
         return
       }
 
@@ -346,7 +344,6 @@ export class PAPQ <T> extends EventEmitter {
     const partition = this.partitions.get(key)
 
     if (!partition) {
-      console.warn(`PAPQ#resetPartitionKey called with unknown partition key ${key}`)
       return
     }
 
@@ -357,7 +354,6 @@ export class PAPQ <T> extends EventEmitter {
     const partition = this.partitions.get(key)
 
     if (!partition) {
-      console.warn(`PAPQ#throwPartitionBreaker called with unknown partition key ${key}`)
       return
     }
 
@@ -368,7 +364,6 @@ export class PAPQ <T> extends EventEmitter {
     const partition = this.partitions.get(key)
 
     if (!partition) {
-      console.warn(`PAPQ#emptyPartition called with unknown partition key ${key}`)
       return
     }
 
@@ -378,10 +373,6 @@ export class PAPQ <T> extends EventEmitter {
   public subscribe(fn: (d: T, partitionKey?: string) => void) : void {
 
     let wasSubscribed = !!this.subscriber
-
-    if (wasSubscribed) {
-      console.warn('PAPQ#subscribe called more than once, which rebinds the subscription to a new function each time!  Only one subscriber can be present')
-    }
 
     this.subscriber = fn
 
@@ -394,7 +385,6 @@ export class PAPQ <T> extends EventEmitter {
     const partition = this.partitions.get(key)
 
     if (!partition) {
-      console.warn(`PAPQ#skip was called with unknown partition key ${key}`)
       return
     }
 
